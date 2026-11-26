@@ -2,7 +2,7 @@ import type { Hono } from "hono"
 import { streamSSE } from "hono/streaming"
 import { describeRoute, type DescribeRouteOptions } from "hono-openapi"
 import { z } from "zod"
-import { remoteSessionStatusRequestSchema, remoteSessionStatusResultSchema, type RemoteSessionReadResult } from "@openwork/types/automations"
+import { remoteSessionStatusRequestSchema, remoteSessionStatusResultSchema } from "@openwork/types/automations"
 import {
   boundRemoteSessionsResponseSchema,
   memberSessionListResponseSchema,
@@ -27,6 +27,8 @@ import {
   type RemoteSessionAction,
   type RemoteSessionExecuteDeps,
 } from "../../mcp/remote-session-capabilities.js"
+import { appLogger } from "../../observability/logger.js"
+import { createRemoteSessionStreamUpdates } from "../../remote-sessions/stream-updates.js"
 import { readRemoteSessionTail } from "../../remote-sessions/tails.js"
 import { createSignalWaiter, hasRemoteSessionSignalPubSub, onRemoteSessionUserUpdate } from "../../remote-sessions/work-signal.js"
 
@@ -328,12 +330,25 @@ export function registerRemoteSessionRoutes<T extends { Variables: Partial<Organ
       return streamSSE(c, async (stream) => {
         const waiter = createSignalWaiter((wake) => onRemoteSessionUserUpdate(organizationId, userId, wake))
         let lastKeepaliveAt = Date.now()
-        const seen = new Map<string, { version: string; tailUpdatedAt: number | null }>()
         try {
           const initial = await listBoundRemoteSessions({ organizationId, userId, limit: 50 }, options.deps)
-          for (const session of initial) {
-            seen.set(session.threadKey, { version: session.status.version, tailUpdatedAt: session.tailUpdatedAt })
-          }
+          const publishUpdates = createRemoteSessionStreamUpdates(initial, {
+            async readTail(threadKey) {
+              try {
+                return await readRemoteSessionTail({ organizationId, createdByUserId: userId, threadKey })
+              } catch (error) {
+                appLogger.warn("remote_session_stream_tail_read_failed", {
+                  component: "remote_session_stream",
+                  error: error instanceof Error ? error.name : "UnknownError",
+                })
+                return null
+              }
+            },
+            publish(update) {
+              const event = remoteSessionStreamUpdateEventSchema.parse(update)
+              return stream.writeSSE({ event: "update", data: JSON.stringify(event) })
+            },
+          })
           const snapshot = remoteSessionStreamSnapshotEventSchema.parse({ type: "snapshot", sessions: initial })
           await stream.writeSSE({ event: "snapshot", data: JSON.stringify(snapshot) })
           let hasActive = initial.some((item) => item.status.state !== "idle" && item.status.state !== "error")
@@ -347,30 +362,7 @@ export function registerRemoteSessionRoutes<T extends { Variables: Partial<Organ
 
             const latest = await listBoundRemoteSessions({ organizationId, userId, limit: 50 }, options.deps)
             hasActive = latest.some((item) => item.status.state !== "idle" && item.status.state !== "error")
-            const changed = []
-            const tailKeysToRead: string[] = []
-            for (const session of latest) {
-              const previous = seen.get(session.threadKey)
-              const versionChanged = !previous || previous.version !== session.status.version
-              const tailChanged = session.tailUpdatedAt !== null && (!previous || previous.tailUpdatedAt !== session.tailUpdatedAt)
-              if (versionChanged || tailChanged) {
-                changed.push(session)
-                if (tailChanged) tailKeysToRead.push(session.threadKey)
-              }
-              seen.set(session.threadKey, { version: session.status.version, tailUpdatedAt: session.tailUpdatedAt })
-            }
-            if (changed.length > 0) {
-              const tails: Record<string, RemoteSessionReadResult> = {}
-              for (const key of tailKeysToRead.slice(0, 5)) {
-                const stored = await readRemoteSessionTail({ organizationId, createdByUserId: userId, threadKey: key })
-                if (stored) tails[key] = stored.payload
-              }
-              const update = remoteSessionStreamUpdateEventSchema.parse({
-                type: "update",
-                sessions: changed,
-                ...(Object.keys(tails).length > 0 ? { tails } : {}),
-              })
-              await stream.writeSSE({ event: "update", data: JSON.stringify(update) })
+            if (await publishUpdates(latest)) {
               lastKeepaliveAt = Date.now()
             } else if (Date.now() - lastKeepaliveAt >= STREAM_KEEPALIVE_MS) {
               await stream.writeSSE({ event: "keepalive", data: "{}" })

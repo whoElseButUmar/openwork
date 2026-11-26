@@ -417,6 +417,50 @@ test("the connection test reports guardrail intervention instead of a misleading
   assert.deepEqual(record(JSON.parse(entry.body)).guardrailConfig, guardrail)
 })
 
+for (const { error, deadlineExpired, code, message } of [
+  {
+    error: new DOMException("fixture body timed out", "TimeoutError"),
+    deadlineExpired: false,
+    code: "upstream_timeout",
+    message: "The provider didn't answer within 30 seconds.",
+  },
+  {
+    error: Object.assign(new Error("aborted"), { code: "ECONNRESET" }),
+    deadlineExpired: true,
+    code: "upstream_timeout",
+    message: "The provider didn't answer within 30 seconds.",
+  },
+  {
+    error: Object.assign(new Error("aborted"), { code: "ECONNRESET" }),
+    deadlineExpired: false,
+    code: "upstream_unreachable",
+    message: "AI Gateway couldn't reach the provider. Check the settings above.",
+  },
+]) {
+  test(`a guarded connection test reports ${code} for ${error.name} after headers (deadline expired: ${deadlineExpired})`, async (t) => {
+    const deadline = new AbortController()
+    t.mock.method(AbortSignal, "timeout", () => deadline.signal)
+    const partialBody = new TextEncoder().encode('{"output":')
+    let sentPartialBody = false
+    const result = await runProviderTest(providerTestRequest(), {
+      ...testDependencies([]),
+      fetch: async () => new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sentPartialBody) {
+            if (deadlineExpired) deadline.abort(new DOMException("fixture deadline expired", "TimeoutError"))
+            controller.error(error)
+            return
+          }
+          sentPartialBody = true
+          controller.enqueue(partialBody)
+        },
+      }), { headers: { "content-type": "application/json" } }),
+    }, true)
+
+    assert.deepEqual(result, { ok: false, model: upstreamModel, status: null, code, message })
+  })
+}
+
 test("administrator testing a guarded Mantle provider fails without dispatch", async () => {
   const sent: Sent[] = []
   const result = await runProviderTest(providerTestRequest(guardrail, true), testDependencies(sent), true)

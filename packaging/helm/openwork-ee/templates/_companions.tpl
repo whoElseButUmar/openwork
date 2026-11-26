@@ -66,8 +66,23 @@ resources: {}
 {{- end -}}
 {{- end -}}
 
+{{- define "openwork-ee.companions.runnerServiceName" -}}
+{{- $releaseName := include "openwork-ee.fullname" . -}}
+{{- $componentSuffix := "-headless-runner" -}}
+{{- $serviceName := printf "%s%s" $releaseName $componentSuffix -}}
+{{- $dnsLabelLimit := 63 -}}
+{{- if gt (len $serviceName) $dnsLabelLimit -}}
+{{- $hash := sha256sum $releaseName | trunc 8 -}}
+{{- $suffix := printf "-%s%s" $hash $componentSuffix -}}
+{{- $prefixLength := int (sub $dnsLabelLimit (len $suffix)) -}}
+{{- $prefix := trunc $prefixLength $releaseName | trimSuffix "-" -}}
+{{- $serviceName = printf "%s%s" $prefix $suffix -}}
+{{- end -}}
+{{- $serviceName -}}
+{{- end -}}
+
 {{- define "openwork-ee.companions.runnerUrl" -}}
-http://{{ include "openwork-ee.fullname" . }}-headless-runner:8795
+http://{{ include "openwork-ee.companions.runnerServiceName" . }}:8795
 {{- end -}}
 
 {{- define "openwork-ee.companions.secretEnv" -}}

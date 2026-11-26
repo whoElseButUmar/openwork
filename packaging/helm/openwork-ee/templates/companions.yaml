@@ -24,11 +24,15 @@ spec:
 {{- $settings := ternary $r $w $runner }}
 {{- $port := ternary 8795 3020 $runner }}
 {{- if $settings.enabled }}
+{{- $serviceName := printf "%s-%s" (include "openwork-ee.fullname" $) $component }}
+{{- if $runner }}
+{{- $serviceName = include "openwork-ee.companions.runnerServiceName" $ }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "openwork-ee.fullname" $ }}-{{ $component }}
+  name: {{ $serviceName }}
   labels:
     {{- include "openwork-ee.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
 spec:

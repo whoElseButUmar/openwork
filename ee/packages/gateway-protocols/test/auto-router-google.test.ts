@@ -288,6 +288,7 @@ test("google stream: max tokens, safety, and errors", async () => {
   }
   assert.equal(reasonOf(await run([{ candidates: [{ content: { parts: [{ text: "a" }] }, finishReason: "MAX_TOKENS" }] }])), "length")
   assert.equal(reasonOf(await run([{ candidates: [{ finishReason: "SAFETY" }] }])), "content_filter")
+  assert.equal(reasonOf(await run([{ promptFeedback: { blockReason: "SAFETY" } }])), "content_filter")
   assert.equal(reasonOf(await run([{ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }])), "stop")
 
   const failed = await run([
@@ -296,6 +297,30 @@ test("google stream: max tokens, safety, and errors", async () => {
   ])
   assert.deepEqual(parseJson(failed.at(-1) ?? "{}"), { error: { message: "The model is overloaded.", type: "unavailable", code: "UNAVAILABLE" } })
   assert.ok(!failed.includes("[DONE]"))
+})
+
+test("google stream reports an incomplete reply after an early close", async () => {
+  const candidate = { content: { parts: [{ text: "Partial reply" }] } }
+  const responses = [
+    { candidates: [candidate] },
+    { candidates: [{ ...candidate, finishReason: "FINISH_REASON_UNSPECIFIED" }] },
+    { candidates: [candidate], promptFeedback: { blockReason: "BLOCK_REASON_UNSPECIFIED" } },
+    { candidates: [candidate], promptFeedback: { blockReason: "" } },
+  ]
+  for (const response of responses) {
+    const upstream = stream(`data: ${JSON.stringify(response)}\n\n`)
+    const output = await readAll(googleTranslator.streamToChat(upstream, { route, stream: true, remember: () => {} }))
+    const events = dataEvents(output)
+
+    assert.match(output, /"content":"Partial reply"/)
+    assert.ok(!events.includes("[DONE]"))
+    assert.ok(!output.includes('"finish_reason":"stop"'))
+    assert.deepEqual(parseJson(events.at(-1) ?? "{}").error, {
+      message: "The provider ended the response before it finished.",
+      type: "api_error",
+      code: "upstream_stream_incomplete",
+    })
+  }
 })
 
 test("google json: text, reasoning, tool calls, usage", () => {

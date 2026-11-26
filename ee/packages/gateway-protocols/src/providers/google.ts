@@ -370,7 +370,8 @@ function candidateParts(candidate: JsonObject): JsonObject[] {
 }
 
 function promptBlocked(response: JsonObject) {
-  return isJsonObject(response.promptFeedback) && typeof response.promptFeedback.blockReason === "string"
+  const blockReason = isJsonObject(response.promptFeedback) ? response.promptFeedback.blockReason : undefined
+  return typeof blockReason === "string" && blockReason.length > 0 && blockReason !== "BLOCK_REASON_UNSPECIFIED"
 }
 
 type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } }
@@ -440,7 +441,7 @@ export function geminiErrorToChat(body: unknown, status?: number): JsonObject {
 
 const encoder = new TextEncoder()
 
-/** A generateContent SSE stream (`?alt=sse`) as a Chat Completions SSE stream, ending with usage and [DONE]. */
+/** Translate generateContent SSE into Chat Completions SSE. Completed streams end with usage and [DONE]. */
 export function geminiStreamToChat(body: ReadableStream<Uint8Array>, route: AutoRouteInfo, remember?: RememberReasoning): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder()
   let buffer = ""
@@ -448,7 +449,7 @@ export function geminiStreamToChat(body: ReadableStream<Uint8Array>, route: Auto
   const created = Math.floor(Date.now() / 1000)
   let started = false
   let finished = false
-  let reason: unknown = undefined
+  let reason: string | undefined
   let blocked = false
   let toolIndex = 0
   const usage: GeminiUsage = { prompt: 0, candidates: 0, thoughts: 0, cached: 0, total: null }
@@ -488,7 +489,10 @@ export function geminiStreamToChat(body: ReadableStream<Uint8Array>, route: Auto
       const call = toolCallFrom(part, remember)
       if (call) out += chunk({ tool_calls: [{ index: toolIndex++, ...call }] })
     }
-    if (candidate.finishReason !== undefined) reason = candidate.finishReason
+    const receivedReason = candidate.finishReason
+    if (typeof receivedReason === "string" && receivedReason && receivedReason !== "FINISH_REASON_UNSPECIFIED") {
+      reason = receivedReason
+    }
     return out
   }
 
@@ -528,7 +532,16 @@ export function geminiStreamToChat(body: ReadableStream<Uint8Array>, route: Auto
     flush(controller) {
       buffer += decoder.decode()
       drain(controller, true)
-      if (started && !finished) controller.enqueue(encoder.encode(finish()))
+      if (finished) return
+      if (reason === undefined && !blocked) {
+        const incomplete = errorBody({
+          message: "The provider ended the response before it finished.",
+          code: "upstream_stream_incomplete",
+        })
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(incomplete)}\n\n`))
+        return
+      }
+      controller.enqueue(encoder.encode(finish()))
     },
   }))
 }

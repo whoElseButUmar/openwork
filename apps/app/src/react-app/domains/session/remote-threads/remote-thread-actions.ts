@@ -1,9 +1,11 @@
 import type { RemoteSessionAnswerInput } from "@openwork/types/automations"
 
 import { createDenClient, DenApiError, readDenSettings } from "@/app/lib/den"
+import { t } from "@/i18n"
 import {
   latestUserMessageId,
   parseRemoteRead,
+  parseRemoteStop,
   remoteActionError,
   remoteFollowUpMessageId,
   remotePendingRequestId,
@@ -104,8 +106,17 @@ export async function stopRemoteThread(entry: RemoteThreadEntry, latestUserId?: 
       const tail = await readRemoteThread(entry, { limit: 4 })
       messageId = tail.kind === "page" ? latestUserMessageId(tail.page.messages) : null
     }
-    return remoteActionError(await call("stop", { ...location, ...(messageId ? { messageId } : {}) }))
+    const payload = await call("stop", { ...location, ...(messageId ? { messageId } : {}) })
+    const outcome = parseRemoteStop(payload, entry.start.target)
+    switch (outcome.kind) {
+      case "confirmed": return null
+      case "error": return { code: outcome.code, message: outcome.message, retryable: outcome.retryable }
+      case "pending": return { code: "stop_pending", message: t("session.remote_task_stop_pending"), retryable: false }
+      case "different_turn": return { code: "different_turn", message: t("session.remote_task_stop_different_turn"), retryable: false }
+      case "unconfirmed": return { code: "stop_unconfirmed", message: t("session.remote_task_stop_unconfirmed"), retryable: false }
+    }
   } catch (error) {
-    return failure(error)
+    if (error instanceof DenApiError) return failure(error)
+    return { code: "stop_unconfirmed", message: t("session.remote_task_stop_unconfirmed"), retryable: false }
   }
 }

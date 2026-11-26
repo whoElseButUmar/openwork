@@ -1,5 +1,8 @@
-import { expect, test } from "bun:test"
+import { expect, spyOn, test } from "bun:test"
+import { GlobalRegistrator } from "@happy-dom/global-registrator"
 import type { UIMessage } from "ai"
+import { initializeDenBootstrapConfig, setDenBootstrapConfig, writeDenSettings } from "../src/app/lib/den"
+import { stopRemoteThread } from "../src/react-app/domains/session/remote-threads/remote-thread-actions"
 import { createSessionDraftStore, cloudSessionDraftScope } from "../src/react-app/domains/session/sync/draft-store"
 import {
   REMOTE_THREAD_FOLLOW_MAX_MS,
@@ -9,7 +12,7 @@ import {
   type RemoteThreadEntry,
 } from "../src/react-app/domains/session/remote-threads/remote-thread-store"
 import { remoteSessionRouteId } from "../src/lib/remote-session-route"
-import { mergeRemoteThreadStart, remoteThreadActivitiesFromToolPart } from "../src/lib/remote-session-thread"
+import { mergeRemoteThreadStart, parseRemoteStop, remoteThreadActivitiesFromToolPart } from "../src/lib/remote-session-thread"
 import { conversationRemoteTasks } from "../src/react-app/domains/session/surface/composer/composer-subagent-tracker"
 import {
   clearRemoteFollowUpDraftMessageId,
@@ -45,6 +48,63 @@ function makeEntry(overrides: Partial<RemoteThreadEntry> & { id: string }): Remo
     lastViewedAt: overrides.lastViewedAt ?? now,
   }
 }
+
+test("stop requires the target computer's affirmative receipt", () => {
+  const desktopReceipt = { target: "desktop", sessionId: "ses_remote", stopped: true, reason: null }
+  const cloudReceipt = { sessionId: "ses_remote", accepted: true }
+  expect(parseRemoteStop(desktopReceipt, "desktop")).toEqual({ kind: "confirmed" })
+  expect(parseRemoteStop(cloudReceipt, "cloud")).toEqual({ kind: "confirmed" })
+  expect(parseRemoteStop(desktopReceipt, "cloud")).toEqual({ kind: "unconfirmed" })
+  expect(parseRemoteStop(cloudReceipt, "desktop")).toEqual({ kind: "unconfirmed" })
+  expect(parseRemoteStop({ accepted: false }, "cloud")).toEqual({ kind: "unconfirmed" })
+  expect(parseRemoteStop({}, "desktop")).toEqual({ kind: "unconfirmed" })
+})
+
+test("pending and different-turn stop receipts are not confirmations", () => {
+  const pending = { state: "pending", requestId: "rsr_stop" }
+  const differentTurn = { stopped: false, reason: "different_turn" }
+  expect(parseRemoteStop(pending, "desktop")).toEqual({ kind: "pending" })
+  expect(parseRemoteStop(differentTurn, "desktop")).toEqual({ kind: "different_turn" })
+  expect(parseRemoteStop(differentTurn, "cloud")).toEqual({ kind: "different_turn" })
+})
+
+test("stop preserves a reported request error", () => {
+  expect(parseRemoteStop({ error: "stop_unavailable", message: "Stop is unavailable.", retryable: false }, "cloud")).toEqual({
+    kind: "error", code: "stop_unavailable", message: "Stop is unavailable.", retryable: false,
+  })
+})
+
+test("a pending stop polls its receipt without resending the guarded stop", async () => {
+  const baseUrl = "https://den.example.test"
+  const remoteSessionsPath = "/api/den/v1/remote-sessions"
+  const requests: Array<{ path: string; body: unknown }> = []
+  GlobalRegistrator.register({ url: "http://localhost:5173/" })
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    const path = new URL(String(url)).pathname
+    requests.push({ path, body: JSON.parse(String(init?.body)) })
+    if (path === `${remoteSessionsPath}/stop`) return Response.json({ state: "pending", requestId: "rsr_stop" })
+    if (path === `${remoteSessionsPath}/read`) return Response.json({ stopped: false, reason: "different_turn" })
+    throw new Error(`Unexpected request: ${path}`)
+  })
+  try {
+    await initializeDenBootstrapConfig()
+    await setDenBootstrapConfig({ baseUrl, apiBaseUrl: baseUrl })
+    writeDenSettings({ baseUrl, apiBaseUrl: baseUrl, authToken: "fixture-session", activeOrgId: "org_a" }, { persistBootstrap: false })
+    const entry = makeEntry({ id: "rsc_stop" })
+    entry.start = { ...entry.start, sessionId: "ses_remote", workspaceId: "ws_remote" }
+
+    const result = await stopRemoteThread(entry, "msg_guard")
+
+    expect(result).toMatchObject({ code: "different_turn", retryable: false })
+    expect(requests).toEqual([
+      { path: `${remoteSessionsPath}/stop`, body: { sessionId: "ses_remote", workspaceId: "ws_remote", messageId: "msg_guard" } },
+      { path: `${remoteSessionsPath}/read`, body: { requestId: "rsr_stop" } },
+    ])
+  } finally {
+    fetch.mockRestore()
+    await GlobalRegistrator.unregister()
+  }
+})
 
 test("opening an old remote task can resolve its session without polling it in the background", () => {
   const now = REMOTE_THREAD_FOLLOW_MAX_MS + 1000

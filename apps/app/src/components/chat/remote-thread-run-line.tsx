@@ -5,6 +5,7 @@ import type { DynamicToolUIPart } from "ai"
 import { ChevronRight, Square } from "lucide-react"
 
 import { useMessageList } from "@/components/chat/message-list-provider"
+import { toast } from "@/components/ui/sonner"
 import { t } from "@/i18n"
 import { remoteToolCallStartedAt, type RemoteThreadStart } from "@/lib/remote-session-thread"
 import { cn } from "@/lib/utils"
@@ -46,7 +47,8 @@ export function RemoteThreadRunLine({ start, part, className }: { start: RemoteT
   const stop = view.active && view.started && entry && !readOnly ? () => {
     setStopping(true)
     void stopRemoteThread(entry).then((failure) => {
-      if (!failure) setStoppedHere(true)
+      if (failure) toast.error(failure.message)
+      else setStoppedHere(true)
     }).finally(() => setStopping(false))
   } : null
 

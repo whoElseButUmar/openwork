@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 
+import { toast } from "@/components/ui/sonner"
 import { t } from "@/i18n"
 import type { RemoteThreadStart } from "@/lib/remote-session-thread"
 import { AgentTrackerRow, type AgentTrackerKind } from "@/react-app/domains/session/surface/composer/agent-tracker-row"
@@ -40,7 +41,8 @@ export function RemoteTrackerRow({ start, owner, startedAt, onKind, onOpen }: {
     if (!entry) return
     setStopping(true)
     void stopRemoteThread(entry).then((failure) => {
-      if (!failure) setStoppedHere(true)
+      if (failure) toast.error(failure.message)
+      else setStoppedHere(true)
     }).finally(() => setStopping(false))
   }
 

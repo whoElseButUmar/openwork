@@ -4,6 +4,7 @@ import { ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Skeleton } from "@/components/ui/skeleton"
+import { toast } from "@/components/ui/sonner"
 import { t } from "@/i18n"
 import { cn } from "@/lib/utils"
 import { childOrigin, prepareChildReturn } from "@/lib/child-navigation"
@@ -113,7 +114,9 @@ export function RemoteSessionHeader({ threadKey, navigation }: { threadKey: stri
           aria-label={t(stopping ? "session.remote_task_stopping" : "session.remote_task_stop", { title: view.title })}
           onClick={() => {
             setStopping(true)
-            void stopRemoteThread(entry).finally(() => setStopping(false))
+            void stopRemoteThread(entry).then((failure) => {
+              if (failure) toast.error(failure.message)
+            }).finally(() => setStopping(false))
           }}
         >
           {t(stopping ? "session.remote_task_stopping_short" : "session.remote_task_stop_short")}

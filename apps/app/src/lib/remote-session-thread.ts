@@ -1,6 +1,6 @@
 import type { DynamicToolUIPart } from "ai"
 
-import type { RemoteSessionPending } from "@openwork/types/automations"
+import { remoteSessionStopResultSchema, type RemoteSessionPending } from "@openwork/types/automations"
 
 import { connectRemoteSessionAction, parseRecord } from "@/lib/capability-call"
 import { parseRemotePending } from "@/lib/remote-session-answers"
@@ -416,6 +416,26 @@ export function remoteActionError(payload: unknown): { code: string; message: st
 export function remotePendingRequestId(payload: unknown): string | null {
   const record = parseRecord(payload)
   return record?.state === "pending" ? text(record.requestId) : null
+}
+
+type RemoteStopOutcome =
+  | { kind: "confirmed" | "pending" | "different_turn" | "unconfirmed" }
+  | { kind: "error"; code: string; message: string; retryable: boolean }
+
+export function parseRemoteStop(payload: unknown, target: RemoteThreadStart["target"]): RemoteStopOutcome {
+  const error = remoteActionError(payload)
+  if (error) return { kind: "error", ...error }
+
+  const record = parseRecord(payload)
+  if (record?.state === "pending") return { kind: "pending" }
+
+  const receipt = remoteSessionStopResultSchema.safeParse(record)
+  if (receipt.success && receipt.data.reason === "different_turn") return { kind: "different_turn" }
+
+  const confirmed = target === "desktop"
+    ? receipt.success && receipt.data.stopped && receipt.data.reason === null
+    : record?.accepted === true
+  return { kind: confirmed ? "confirmed" : "unconfirmed" }
 }
 
 export function parseRemoteRead(payload: unknown): RemoteReadOutcome {

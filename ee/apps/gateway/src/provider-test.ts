@@ -298,6 +298,16 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
     call = built
   }
 
+  const transportFailure = (error: unknown): GatewayProviderTestResult => {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      return failed("upstream_timeout", "The provider didn't answer within 30 seconds.", model)
+    }
+    const message = custom
+      ? "AI Gateway couldn't connect to this address. Check the API address, and that it's reachable from the internet over HTTPS with a valid certificate."
+      : "AI Gateway couldn't reach the provider. Check the settings above."
+    return failed("upstream_unreachable", message, model)
+  }
+
   const send = async (body: Record<string, unknown>): Promise<Response | GatewayProviderTestResult> => {
     let upstream: UpstreamCall
     try {
@@ -316,11 +326,7 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
     try {
       return await dependencies.fetch(upstream.url, { method: "POST", headers: upstream.headers, body: upstream.body, redirect: "error", signal: AbortSignal.timeout(TEST_TIMEOUT_MS) })
     } catch (error) {
-      const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
-      if (timedOut) return failed("upstream_timeout", "The provider didn't answer within 30 seconds.", model)
-      return failed("upstream_unreachable", custom
-        ? "AI Gateway couldn't connect to this address. Check the API address, and that it's reachable from the internet over HTTPS with a valid certificate."
-        : "AI Gateway couldn't reach the provider. Check the settings above.", model)
+      return transportFailure(error)
     }
   }
 
@@ -338,7 +344,12 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
   }
   if (response.ok) {
     if (guardrailsEnabled && family === "bedrock" && hasBedrockGuardrail(settings)) {
-      const checked = await normalizeBedrockGuardrailResponse(response, "converse")
+      let checked: Response
+      try {
+        checked = await normalizeBedrockGuardrailResponse(response, "converse")
+      } catch (error) {
+        return transportFailure(error)
+      }
       if (!checked.ok) {
         await checked.body?.cancel().catch(() => {})
         return failed("invalid_guarded_response", "The provider did not return a valid guarded response. Ask your administrator to check the provider.", model, checked.status)

@@ -298,8 +298,8 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
     call = built
   }
 
-  const transportFailure = (error: unknown): GatewayProviderTestResult => {
-    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+  const transportFailure = (error: unknown, deadline: AbortSignal): GatewayProviderTestResult => {
+    if (deadline.aborted || (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))) {
       return failed("upstream_timeout", "The provider didn't answer within 30 seconds.", model)
     }
     const message = custom
@@ -308,7 +308,7 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
     return failed("upstream_unreachable", message, model)
   }
 
-  const send = async (body: Record<string, unknown>): Promise<Response | GatewayProviderTestResult> => {
+  const send = async (body: Record<string, unknown>): Promise<{ response: Response; deadline: AbortSignal } | GatewayProviderTestResult> => {
     let upstream: UpstreamCall
     try {
       const url = validateInferenceUrl(call.url)
@@ -323,22 +323,27 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
     upstream.body = guarded.body
     if (auth.kind === "header") upstream.headers.set(auth.name, auth.value)
     else signAwsRequest({ method: "POST", url: upstream.url, headers: upstream.headers, body: upstream.body, credentials: auth.credentials, region: auth.region, service: family === "bedrock_mantle" ? bedrockMantleService : bedrockService, now: dependencies.now() })
+    const deadline = AbortSignal.timeout(TEST_TIMEOUT_MS)
     try {
-      return await dependencies.fetch(upstream.url, { method: "POST", headers: upstream.headers, body: upstream.body, redirect: "error", signal: AbortSignal.timeout(TEST_TIMEOUT_MS) })
+      const response = await dependencies.fetch(upstream.url, { method: "POST", headers: upstream.headers, body: upstream.body, redirect: "error", signal: deadline })
+      return { response, deadline }
     } catch (error) {
-      return transportFailure(error)
+      return transportFailure(error, deadline)
     }
   }
 
-  let response = await send(call.body)
-  if (!(response instanceof Response)) return response
+  const attempt = await send(call.body)
+  if (!("response" in attempt)) return attempt
+  let { response, deadline } = attempt
   let providerMessage: string | null = null
   if (!response.ok) {
     providerMessage = isAwsFamily(family) ? null : await readErrorMessage(response, secrets)
     if (isAwsFamily(family)) await response.body?.cancel().catch(() => {})
     if (custom && refusesParameter(response.status, providerMessage) && /max_tokens/.test(providerMessage ?? "")) {
-      response = await send(customBody(model, input.customModel, "max_completion_tokens"))
-      if (!(response instanceof Response)) return response
+      const retry = await send(customBody(model, input.customModel, "max_completion_tokens"))
+      if (!("response" in retry)) return retry
+      response = retry.response
+      deadline = retry.deadline
       providerMessage = response.ok ? null : await readErrorMessage(response, secrets)
     }
   }
@@ -348,7 +353,7 @@ export async function runProviderTest(input: TestRequest, dependencies: Provider
       try {
         checked = await normalizeBedrockGuardrailResponse(response, "converse")
       } catch (error) {
-        return transportFailure(error)
+        return transportFailure(error, deadline)
       }
       if (!checked.ok) {
         await checked.body?.cancel().catch(() => {})

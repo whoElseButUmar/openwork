@@ -417,19 +417,29 @@ test("the connection test reports guardrail intervention instead of a misleading
   assert.deepEqual(record(JSON.parse(entry.body)).guardrailConfig, guardrail)
 })
 
-for (const { error, code, message } of [
+for (const { error, deadlineExpired, code, message } of [
   {
     error: new DOMException("fixture body timed out", "TimeoutError"),
+    deadlineExpired: false,
     code: "upstream_timeout",
     message: "The provider didn't answer within 30 seconds.",
   },
   {
-    error: new TypeError("fixture body disconnected"),
+    error: Object.assign(new Error("aborted"), { code: "ECONNRESET" }),
+    deadlineExpired: true,
+    code: "upstream_timeout",
+    message: "The provider didn't answer within 30 seconds.",
+  },
+  {
+    error: Object.assign(new Error("aborted"), { code: "ECONNRESET" }),
+    deadlineExpired: false,
     code: "upstream_unreachable",
     message: "AI Gateway couldn't reach the provider. Check the settings above.",
   },
 ]) {
-  test(`a guarded connection test reports ${code} when the body fails after headers`, async () => {
+  test(`a guarded connection test reports ${code} for ${error.name} after headers (deadline expired: ${deadlineExpired})`, async (t) => {
+    const deadline = new AbortController()
+    t.mock.method(AbortSignal, "timeout", () => deadline.signal)
     const partialBody = new TextEncoder().encode('{"output":')
     let sentPartialBody = false
     const result = await runProviderTest(providerTestRequest(), {
@@ -437,6 +447,7 @@ for (const { error, code, message } of [
       fetch: async () => new Response(new ReadableStream<Uint8Array>({
         pull(controller) {
           if (sentPartialBody) {
+            if (deadlineExpired) deadline.abort(new DOMException("fixture deadline expired", "TimeoutError"))
             controller.error(error)
             return
           }

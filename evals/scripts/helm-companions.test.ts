@@ -34,9 +34,9 @@ const workbot = {
   "workbot.secret.sessionSecretKey": "session-key",
 };
 
-function render(values: Record<string, string | boolean> = {}, failure?: string, chartPath = chart) {
+function render(values: Record<string, string | boolean> = {}, failure?: string, chartPath = chart, release = "contract") {
   const args = Object.entries(values).flatMap(([key, value]) => [typeof value === "boolean" ? "--set" : "--set-string", `${key}=${value}`]);
-  const result = spawnSync("helm", ["template", "contract", chartPath, "--skip-tests", ...args], { encoding: "utf8" });
+  const result = spawnSync("helm", ["template", release, chartPath, "--skip-tests", ...args], { encoding: "utf8" });
   assert.ifError(result.error);
   if (failure) {
     assert.notEqual(result.status, 0);
@@ -116,6 +116,28 @@ test("an operator connects Den to one private runner with targeted secrets and p
   assert.ok(!document(output, "Deployment", "den-web").includes("DEN_HEADLESS_RUNNER_"));
   assert.ok(!output.includes("DEN_WORKBOT_URL"));
   evidence.recordAssertionEvidence("private single-writer wiring", "One Recreate replica, RWO retained PVC, API/callback/grant secret refs, derived Gateway and public Den URLs", true);
+});
+
+test("long release names produce a valid private runner Service", ({ evidence }) => {
+  const release = `openwork-${"x".repeat(29)}`;
+  const output = render(workbot, undefined, chart, release);
+
+  function runnerServiceName(yaml: string) {
+    const service = yaml.split(/^---$/m).find((part) =>
+      part.includes("kind: Service\n") && part.includes("app.kubernetes.io/component: headless-runner\n"));
+    assert.ok(service, "the runner Service is rendered");
+    const name = /^  name: ([a-z0-9-]+)$/m.exec(service)?.[1];
+    assert.ok(name, "the runner Service has a DNS label");
+    return name;
+  }
+
+  const name = runnerServiceName(output);
+  assert.match(name, /^[a-z][a-z0-9-]{0,61}[a-z0-9]$/);
+  assert.notEqual(name, runnerServiceName(render(workbot, undefined, chart, `${release.slice(0, -1)}y`)));
+  value(output, "DEN_HEADLESS_RUNNER_URL", `http://${name}:8795`);
+  value(output, "WORKBOT_RUNNER_URL", `http://${name}:8795`);
+  assert.ok(output.includes(`claimName: "${release}-openwork-ee-headless-runner"`));
+  evidence.recordAssertionEvidence("the runner uses a valid Service name", "Both callers resolve the same DNS label and the runner uses its original storage claim", true);
 });
 
 test("an operator adds Workbot through TLS ingress or an existing HTTPS edge", ({ evidence }) => {
